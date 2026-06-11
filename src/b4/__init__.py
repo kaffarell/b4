@@ -5668,13 +5668,10 @@ def edit_in_editor(bdata: bytes, filehint: str = 'COMMIT_EDITMSG') -> bytes:
 
 
 def view_in_pager(bdata: bytes, filehint: str = 'b4-view.txt') -> None:
-    corecfg = get_config_from_git(r'core\..*')
-    pager = (
-        os.environ.get('GIT_PAGER')
-        or corecfg.get('pager')
-        or os.environ.get('PAGER')
-        or 'less'
-    )
+    # This opens a temporary file directly, so use the generic pager rather
+    # than Git's pager configuration. Git pagers such as delta expect Git to
+    # feed them diff output on stdin and may not accept a filename argument.
+    pager = os.environ.get('PAGER') or 'less'
     logger.debug('pager=%s', pager)
 
     topdir = git_get_toplevel()
