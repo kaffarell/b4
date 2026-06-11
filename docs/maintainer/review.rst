@@ -223,6 +223,8 @@ actions depend on the series status:
 **New / gone:**
 
 * ``[r]`` **Review** — create or re-enter the review branch
+* ``[P]`` **Review selected patches** — create a review branch from a
+  manually selected subset (new only; useful for fanned-out series)
 * ``[s]`` **Snooze** — defer until later (new only)
 * ``[A]`` **Abandon**
 
@@ -672,6 +674,11 @@ also not carried over, as they are specific to the previous revision.
 
 Applying patches (take)
 ~~~~~~~~~~~~~~~~~~~~~~~
+For a new fanned-out series whose patches target multiple repositories,
+open the action menu (``a``) and choose **Review selected patches** before
+creating the review branch. The patch picker appears before any test apply,
+so unrelated patches do not have to apply in the current repository.
+
 Open the action menu (``a``) and select **Take** to apply a reviewed series.
 The take flow has three steps:
 
