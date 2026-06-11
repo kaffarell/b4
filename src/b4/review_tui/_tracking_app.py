@@ -107,6 +107,7 @@ from b4.review_tui._modals import (
 # Shortcut keys for the tracking-app action selector.
 _ACTION_SHORTCUTS: Dict[str, str] = {
     'review': 'r',
+    'review_subset': 'P',
     'take': 'T',
     'rebase': 'R',
     'waiting': 'w',
@@ -1691,6 +1692,8 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
         actions: list[tuple[str, str]] = []
         if status in ('new', 'gone'):
             actions.append(('review', 'Review'))
+            if status == 'new':
+                actions.append(('review_subset', 'Review selected patches'))
             if status == 'new' and self._selected_series.get('has_newer'):
                 actions.append(('upgrade', 'Upgrade to newer revision'))
             if status == 'new':
@@ -1747,6 +1750,7 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
             return
         handler = {
             'review': self.action_review,
+            'review_subset': self.action_review_subset,
             'take': self.action_take,
             'rebase': self.action_rebase,
             'abandon': self.action_abandon,
@@ -1803,6 +1807,30 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
             self._load_series()
 
         self.push_screen(screen, callback=_decided)
+
+    def action_review_subset(self) -> None:
+        """Create a review branch from a manually selected patch subset."""
+        if not self._selected_series:
+            return
+        if self._selected_series.get('status', 'new') != 'new':
+            self.action_review()
+            return
+        if self._selected_series.get('has_newer'):
+            current_rev = self._selected_series.get('revision', 1)
+            change_id = self._selected_series.get('change_id', '')
+            try:
+                conn = b4.review.tracking.get_db(self._identifier)
+                newest = b4.review.tracking.get_newest_revision(conn, change_id)
+                conn.close()
+            except Exception:
+                newest = None
+            if newest and newest > current_rev:
+                self.push_screen(
+                    RevisionChoiceScreen(current_rev, newest),
+                    callback=self._on_revision_choice_subset,
+                )
+                return
+        self._checkout_new_series(select_patches=True)
 
     def action_review(self) -> None:
         if not self._selected_series:
@@ -1897,7 +1925,13 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
             # New series - need to check out
             self._checkout_new_series()
 
-    def _on_revision_choice(self, chosen: Optional[int]) -> None:
+    def _on_revision_choice_subset(self, chosen: Optional[int]) -> None:
+        """Handle revision choice for selected-patch checkout."""
+        self._on_revision_choice(chosen, select_patches=True)
+
+    def _on_revision_choice(
+        self, chosen: Optional[int], select_patches: bool = False
+    ) -> None:
         """Handle the revision chosen from the RevisionChoiceScreen."""
         if chosen is None:
             return
@@ -1941,7 +1975,7 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
                 conn.close()
             except Exception:
                 pass
-        self._checkout_new_series()
+        self._checkout_new_series(select_patches=select_patches)
 
     def action_thread(self) -> None:
         """View a series thread in the lite thread viewer."""
@@ -1970,8 +2004,13 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
             )
         )
 
-    def _checkout_new_series(self) -> None:
-        """Retrieve series, build am-ready mbox, and show base selection."""
+    def _checkout_new_series(self, select_patches: bool = False) -> None:
+        """Retrieve series, build am-ready mbox, and show base selection.
+
+        When *select_patches* is true, prompt for a subset before testing or
+        applying.  This is useful for fanned-out series that contain patches
+        for multiple repositories.
+        """
         series = self._selected_series
         if not series:
             return
@@ -2004,26 +2043,28 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
                     else:
                         raise
 
-                try:
-                    am_msgs = lser.get_am_ready(
-                        noaddtrailers=True,
-                        addmysob=False,
-                        addlink=False,
-                        cherrypick=None,
-                        copyccs=False,
-                        allowbadchars=message_id in self._badchars_ok,
-                        showchecks=False,
-                    )
-                except b4.BadCharsError as ex:
-                    # Returned rather than raised: the caller offers the
-                    # reviewer a chance to look at it and continue.
-                    return ex
-                if not am_msgs:
-                    raise LookupError('No patches ready for applying')
+                ambytes = b''
+                if not select_patches:
+                    try:
+                        am_msgs = lser.get_am_ready(
+                            noaddtrailers=True,
+                            addmysob=False,
+                            addlink=False,
+                            cherrypick=None,
+                            copyccs=False,
+                            allowbadchars=message_id in self._badchars_ok,
+                            showchecks=False,
+                        )
+                    except b4.BadCharsError as ex:
+                        # Returned rather than raised: the caller offers the
+                        # reviewer a chance to look at it and continue.
+                        return ex
+                    if not am_msgs:
+                        raise LookupError('No patches ready for applying')
 
-                ifh = io.BytesIO()
-                b4.save_git_am_mbox(am_msgs, ifh)
-                ambytes = ifh.getvalue()
+                    ifh = io.BytesIO()
+                    b4.save_git_am_mbox(am_msgs, ifh)
+                    ambytes = ifh.getvalue()
 
                 # Determine best base: configured, series-specified or guessed
                 topdir = b4.git_get_toplevel()
@@ -2043,7 +2084,9 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
 
         self.push_screen(
             WorkerScreen('Retrieving series\u2026', _fetch_and_prepare),
-            callback=lambda result: self._on_series_fetched(result, series),
+            callback=lambda result: self._on_series_fetched(
+                result, series, select_patches
+            ),
         )
 
     def _confirm_badchars(
@@ -2069,16 +2112,35 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
 
         self.push_screen(BadCharsScreen(error), callback=_on_choice)
 
-    def _on_series_fetched(self, result: Any, series: Dict[str, Any]) -> None:
+    def _on_series_fetched(
+        self, result: Any, series: Dict[str, Any], select_patches: bool = False
+    ) -> None:
         """Handle the result from the series fetch worker."""
         if result is None:
             return
 
         if isinstance(result, b4.BadCharsError):
-            self._confirm_badchars(result, series, self._checkout_new_series)
+            self._confirm_badchars(
+                result, series,
+                lambda: self._checkout_new_series(select_patches=select_patches),
+            )
             return
 
         lser, ambytes, initial_base, base_hint = result
+
+        if select_patches:
+            patches = []
+            for i, lmsg in enumerate(lser.patches[1:], start=1):
+                title = lmsg.full_subject if lmsg is not None else f'Patch {i}'
+                patches.append({'title': title})
+            pick_screen = CherryPickScreen(patches)
+            self.push_screen(
+                pick_screen,
+                callback=lambda confirmed: self._on_checkout_pick_confirmed(
+                    confirmed, pick_screen, lser, series, initial_base, base_hint
+                ),
+            )
+            return
 
         base_suggestions = _build_base_suggestions()
 
@@ -2095,6 +2157,88 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
                 base_sha, lser, series, ambytes
             ),
         )
+
+    def _on_checkout_pick_confirmed(
+        self,
+        confirmed: Optional[bool],
+        pick_screen: 'CherryPickScreen',
+        lser: b4.LoreSeries,
+        series: Dict[str, Any],
+        initial_base: str,
+        base_hint: str,
+    ) -> None:
+        """Prepare a selected patch subset, then continue to base selection."""
+        if not confirmed:
+            self.notify('Checkout cancelled', severity='information')
+            return
+        selected = pick_screen.selected_indices
+
+        def _prepare_selected() -> Union[
+            Tuple[b4.LoreSeries, bytes, str, str], b4.BadCharsError
+        ]:
+            with _quiet_worker():
+                subset = self._subset_lore_series(lser, selected)
+                try:
+                    am_msgs = subset.get_am_ready(
+                        noaddtrailers=True,
+                        addmysob=False,
+                        addlink=False,
+                        cherrypick=None,
+                        copyccs=False,
+                        allowbadchars=series.get('message_id', '') in self._badchars_ok,
+                        showchecks=False,
+                    )
+                except b4.BadCharsError as ex:
+                    return ex
+                if not am_msgs:
+                    raise LookupError('No patches ready for applying')
+                ifh = io.BytesIO()
+                b4.save_git_am_mbox(am_msgs, ifh)
+                return subset, ifh.getvalue(), initial_base, base_hint
+
+        def _on_prepared(result: Any) -> None:
+            if isinstance(result, b4.BadCharsError):
+                self._confirm_badchars(
+                    result, series,
+                    lambda: self._on_checkout_pick_confirmed(
+                        True, pick_screen, lser, series, initial_base, base_hint
+                    ),
+                )
+                return
+            self._on_series_fetched(result, series)
+
+        self.push_screen(
+            WorkerScreen('Preparing selected patches…', _prepare_selected),
+            callback=_on_prepared,
+        )
+
+    @staticmethod
+    def _subset_lore_series(
+        lser: b4.LoreSeries, selected: List[int]
+    ) -> b4.LoreSeries:
+        """Return a LoreSeries containing only the selected 1-based patches."""
+        subset = b4.LoreSeries(lser.revision, len(selected))
+        subset.has_cover = lser.has_cover
+        subset.partial_reroll = lser.partial_reroll
+        subset.subject = lser.subject
+        subset.fromname = lser.fromname
+        subset.fromemail = lser.fromemail
+        subset.base_commit = lser.base_commit
+        subset.change_id = lser.change_id
+        subset.prereq_patch_ids = lser.prereq_patch_ids
+        subset.prereq_base_commit = lser.prereq_base_commit
+        subset.followups = list(lser.followups)
+        subset.trailer_mismatches = set(lser.trailer_mismatches)
+        subset.patches[0] = lser.patches[0] if lser.patches else None
+        for new_idx, old_idx in enumerate(selected, start=1):
+            if old_idx < 1 or old_idx >= len(lser.patches):
+                raise KeyError('Selected patch not in series')
+            lmsg = lser.patches[old_idx]
+            if lmsg is None:
+                raise KeyError('Selected patch is missing from series')
+            subset.patches[new_idx] = lmsg
+        subset.complete = None not in subset.patches[1:]
+        return subset
 
     def _on_base_selected(
         self,
@@ -2305,11 +2449,13 @@ class TrackingApp(LoreNodeShutdownMixin, CheckRunnerMixin, App[Optional[str]]):
             try:
                 conn = b4.review.tracking.get_db(self._identifier)
                 conn.execute(
-                    'UPDATE series SET status = ?, revision = ?, message_id = ? WHERE track_id = ?',
+                    'UPDATE series SET status = ?, revision = ?, message_id = ?, '
+                    'num_patches = ? WHERE track_id = ?',
                     (
                         'reviewing',
                         series.get('revision'),
                         series.get('message_id'),
+                        lser.expected,
                         series.get('track_id'),
                     ),
                 )
