@@ -355,5 +355,6 @@ def rewrite_commits(
         len(oid_map),
         len(notes_snap),
     )
+    b4.jj_abandon_rewritten(repo.workdir, str(old_tip), str(new_tip_oid))
     run_rewrite_hook('post')
     return oid_map

@@ -5921,6 +5921,34 @@ def git_get_toplevel(path: Optional[str] = None) -> Optional[str]:
     return topdir
 
 
+def jj_abandon_rewritten(topdir: Optional[str], old_tip: str, new_tip: str) -> None:
+    """Hide the commits that a rewrite of *old_tip* into *new_tip* replaced.
+
+    In a git repository colocated with jj, jj imports every commit HEAD has
+    pointed at, so each rewrite would otherwise leave the previous copy of
+    the series visible next to the new one. Only commits that jj can still
+    change (so not a sent/ tag), that nothing else builds on, and that no
+    bookmark holds are abandoned. Git refs and objects are not touched, so
+    backups and sent tags keep working. Does nothing without jj.
+    """
+    if not topdir or not os.path.isdir(os.path.join(topdir, '.jj')):
+        return
+    jjbin = shutil.which('jj')
+    if not jjbin:
+        return
+    replaced = f'((::present({old_tip}) ~ ::{new_tip}) & mutable())'
+    revset = f'{replaced} ~ ::((children({replaced}) ~ {replaced}) | bookmarks())'
+    ecode, _out, err = _run_command(
+        [jjbin, '--repository', topdir, 'abandon', '--quiet', '-r', revset],
+        rundir=topdir,
+    )
+    if ecode != 0:
+        logger.debug(
+            'Could not abandon rewritten commits in jj: %s',
+            err.decode(errors='replace').strip(),
+        )
+
+
 def git_get_gitdir(path: Optional[str] = None) -> Optional[str]:
     gitargs = ['rev-parse', '--git-dir']
     lines = git_get_command_lines(path, gitargs)

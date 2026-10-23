@@ -7,6 +7,7 @@ import logging
 import mailbox
 import os
 import pathlib
+import shutil
 from typing import Any, Dict, Generator, List, Optional
 from unittest.mock import patch
 
@@ -655,3 +656,76 @@ def test_enrolled_series_end_to_end(
     assert b4.git_get_current_branch() is None
     assert _refs('refs/heads/') == ['refs/heads/master']
     _assert_no_bogus_branch_config()
+
+
+# -- colocated with jj --------------------------------------------------------
+
+
+def _jj_heads() -> List[str]:
+    """Descriptions of the visible jj heads, as jj log would show them."""
+    out = b4.git_get_command_lines(None, ['rev-parse', '--show-toplevel'])
+    ecode, stdout, err = b4._run_command(
+        [
+            'jj',
+            '--repository',
+            out[0],
+            'log',
+            '--no-graph',
+            '-r',
+            'heads(mutable() ~ @)',
+            '-T',
+            'description.first_line() ++ "\\n"',
+        ]
+    )
+    assert ecode == 0, err
+    return stdout.decode().splitlines()
+
+
+@pytest.fixture
+def colocated(unenrolled: str) -> Generator[str, None, None]:
+    ecode, _out, err = b4._run_command(
+        ['jj', 'git', 'init', '--colocate'], rundir=unenrolled
+    )
+    assert ecode == 0, err
+    yield unenrolled
+
+
+@pytest.mark.skipif(not shutil.which('jj'), reason='jj is not installed')
+def test_jj_keeps_only_the_latest_series(
+    colocated: str, tmp_path: pathlib.Path, transport: _Transport
+) -> None:
+    """Rewrites leave the replaced copies of the series behind as visible
+    jj commits; b4 abandons them, except for what a sent tag holds."""
+    _run('prep', '-e', 'base-tag')
+    assert _jj_heads() == ['Add the second file']
+    _cover_from(tmp_path, COVER)
+    assert _jj_heads() == ['Add the second file']
+
+    _run('send', '--no-sign', '--to', 'list@example.com')
+    change_id = _tracking()['series']['change-id']
+    tagname = f'sent/{change_id}-v1'
+    assert b4.git_revparse_tag(None, tagname)
+    _cover_from(tmp_path, COVER + '\n')
+    assert _jj_heads() == ['Add the second file']
+    assert b4.ez.range_diff_compare(1, execvp=False) is not None
+    # The backup and the sent tag are left to git
+    assert b4.git_revparse_obj(_backup_ref())
+    assert b4.git_revparse_tag(None, tagname)
+
+
+@pytest.mark.skipif(not shutil.which('jj'), reason='jj is not installed')
+def test_jj_keeps_work_built_on_the_old_series(
+    colocated: str, tmp_path: pathlib.Path
+) -> None:
+    _run('prep', '-e', 'base-tag')
+    old_tip = _head()
+    topdir = b4.git_get_toplevel()
+    assert topdir
+    ecode, _out, err = b4._run_command(
+        ['jj', 'new', '-m', 'Built on top', old_tip], rundir=topdir
+    )
+    assert ecode == 0, err
+    ecode, _out, err = b4._run_command(['jj', 'new', old_tip], rundir=topdir)
+    assert ecode == 0, err
+    _cover_from(tmp_path, COVER)
+    assert sorted(_jj_heads()) == ['Add the second file', 'Built on top']

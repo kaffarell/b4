@@ -862,6 +862,11 @@ def start_new_series(cmdargs: argparse.Namespace) -> None:
             if recovery_ref:
                 _explain_enroll_recovery(recovery_ref, cherry_picking=True)
             sys.exit(1)
+        b4.jj_abandon_rewritten(
+            b4.git_get_toplevel(),
+            cherry_range.split('..')[1],
+            b4.git_revparse_obj('HEAD'),
+        )
 
     if patches:
         logger.info('Applying %s patches', len(patches))
